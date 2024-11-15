@@ -27,7 +27,7 @@ SANITY_HEADERS = {
     "Authorization": f"Bearer {SANITY_TOKEN}"
 }
 
-urls_to_scrape = []
+rss_urls_to_scrape = []
 
 rss_feeds = [
     'https://www.dagens.com/feeds/rss/articles/latest-news'
@@ -39,10 +39,10 @@ rss_feeds = [
 for rss_url in rss_feeds:
     feed = feedparser.parse(rss_url)
     for entry in feed.entries:
-        urls_to_scrape.append(entry.link)
+        rss_urls_to_scrape.append(entry.link)
 
 
-  #getJournalist
+  #getJournalist API
 journalists_fetch = requests.get(f"https://{SANITY_PROJECT_ID}.api.sanity.io/v2023-10-03/data/query/{SANITY_DATASET}?query=*[_type == 'journalist']")
 if journalists_fetch.status_code == 200:
     journalists = journalists_fetch.json().get('result', [])
@@ -59,7 +59,7 @@ else:
     print(f"Der opstod en fejl: {journalists_fetch.status_code}")
     print(journalists_fetch.json())
 
-    #getTags
+    #getTags API
 tags_fetch = requests.get(f"https://{SANITY_PROJECT_ID}.api.sanity.io/v2023-10-03/data/query/{SANITY_DATASET}?query=*[_type == 'tag']")
 if tags_fetch.status_code == 200:
     tags = tags_fetch.json().get('result', [])
@@ -78,7 +78,7 @@ else:
 print(tagNames)
 
 
-    #getCategories
+    #getCategories API
 categories_fetch = requests.get(f"https://{SANITY_PROJECT_ID}.api.sanity.io/v2023-10-03/data/query/{SANITY_DATASET}?query=*[_type == 'category']")
 if categories_fetch.status_code == 200:
     categories = categories_fetch.json().get('result', [])
@@ -97,25 +97,24 @@ else:
 print(catNames)
 
 class Article:
-    def __init__(self, title, imageSrc, imageRef, teaser, content):
+    def __init__(self, title, teaser, content):
         self.title = title
-        self.imageSrc = imageSrc
-        self.imageRef = imageRef
         self.teaser = teaser
         self.content = content
 
     def __str__(self):
-        return f"Title: {self.title}\nImage Source: {self.imageSrc}\nTeaser: {self.teaser}\nContent: {self.content}"
+        return f"Title: {self.title}\nTeaser: {self.teaser}\nContent: {self.content}"
     
 
-
-for page_to_scrape in urls_to_scrape:
+# Hentede artikler fra rss
+for page_to_scrape in rss_urls_to_scrape:
 
     try:
         soup = BeautifulSoup(requests.get(page_to_scrape).content, 'html.parser')
 
         # Try to get the title; if not found, move to the next article
-        title_tag = soup.find('h1')
+        # Denne kun godt gøre længere så den kan scapre flere sider af gangen
+        title_tag = soup.find('h1') # or soup.find('smthing')
         if not title_tag or not title_tag.text:
             print(f"Title not found in {page_to_scrape}, skipping.")
             continue
@@ -129,7 +128,8 @@ for page_to_scrape in urls_to_scrape:
         imageSrc = image_tag['src']
 
         # Optional element: if not found, just assign an empty string
-        imageRef = soup.find('span', class_='attachment-label-element') or soup.find('p', class_='editorial-image-description') or ''
+        # imageRef = soup.find('span', class_='attachment-label-element') or soup.find('p', class_='editorial-image-description') or ''
+        
 
         # Try to get the teaser; if not found, move to the next article
         teaser_tag = soup.find('span', class_='teaser-element')
@@ -151,11 +151,44 @@ for page_to_scrape in urls_to_scrape:
                 content_text += child.text + "\n"
 
         # Create the Article object
-        article = Article(title, imageSrc, imageRef, teaser, content_text)
+        article = Article(title, teaser, content_text)
+        #imageRef
+
+        #image url fra GPT
+
+        prompt = f"""
+        Læs denne titel: {article.title}.
+        Find derefter et gratis billede, fra fx. Pexels, Pixabay eller andet gratis medie bibliotek.
+        Billedet skal være vertikalt bred da det skal kunne passe til en artikel.
+        {{
+         "img_url": "Her skriver du urltil billede",
+         "img_caption": "Her skriver du caption til billedet og hvilken sidedu har hentet det fra"
+        }}
+        """
+
+        completion = client.chat.completions.create(
+         messages=[
+              {
+                 "role": "user",
+                 "content": prompt,
+             }
+         ],
+         model="gpt-4o",
+     )
+
+        gpt_output = completion.choices[0].message.content
+        gpt_output_stripped = gpt_output.strip("```json").strip("```")
 
 
-        image_url = article.imageSrc  # URL til det scraped billede
+        # Konverter GPT-output til Python dict
+        gpt_data = json.loads(gpt_output_stripped)
+
+        image_url = gpt_data['img_url'] # URL til det scraped billede
+        imageRef = gpt_data['img_caption']
         image_data = requests.get(image_url).content  # Hent billedet
+
+        print(prompt)
+        
 
         # API URL til Sanity Assets API
         sanity_image_url = f"https://{SANITY_PROJECT_ID}.api.sanity.io/v1/assets/images/{SANITY_DATASET}"
@@ -183,7 +216,7 @@ for page_to_scrape in urls_to_scrape:
                         "patch": {
                             "id": image_id,
                            "set": {
-                               "description": article.imageRef.text if article.imageRef else 'not found'
+                               "description": imageRef or 'not defined',
                            }
                        }
                    }
@@ -195,6 +228,7 @@ for page_to_scrape in urls_to_scrape:
                 else:
                   print(f"Der opstod en fejl ved tilføjelse af beskrivelsen: {description_response.status_code}")
                   print(description_response.json())
+        
 
         prompt = f"""
         Du er en professionel dansk journalist. Din hovedopgave er at generere dybdegående, spændende og fængende artikler på dansk baseret på modtaget indhold.
@@ -212,8 +246,6 @@ for page_to_scrape in urls_to_scrape:
         "content": "Her skriver du artiklens indhold i HTML-format med KUN <p>, <h3> og <a> tags"
         }}
         """
-
-
 
 
         completion = client.chat.completions.create(
